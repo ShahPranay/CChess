@@ -1,7 +1,291 @@
 #include<iostream>
 #include<math.h>
+#include<map>
 #include "../headers/chess_board.h"
 using namespace std;
+
+void chess_board::debug(){
+    for(int i = n_white_pieces; i < n_empty; i++)
+        bitboards[i] = 0;
+    bitboards[n_empty] = 0xFFFFFFFFFFFFFDFF; //11111101 
+    bitboards[n_black_pawn] = 0x0000000000000200;//00000010
+    bitboards[n_black_pieces] = 0x0000000000000200;
+    draw_bitboard(bitboards[n_black_pawn]);cout<<"\n";
+    vector<move_description> moves;
+    generate_moves(1,moves);
+    for(auto mv: moves){
+        draw_bitboard(mv.from | mv.to);cout<<"\n";
+        make_move(mv);
+        draw_bitboard(bitboards[n_black_knight]);cout<<"\n";
+        mailbox_move_update(mv);
+        draw_chessboard();
+        unmake_move(mv);
+        if(mv.is_pawn_promotion)
+        cout<<mv.promoted_piece<<"\n";
+    }
+}
+
+void chess_board::play_chess(){
+    int side = 0;
+    bool keepgoing = true;
+    while(keepgoing){
+        move_description mv = get_best_move(side);
+        make_move(mv);
+        mailbox_move_update(mv);
+        side^=1;
+        draw_chessboard();
+        int tmp;cin>>tmp;
+        int boardno;
+        if(tmp == 2){
+            cin>>boardno;
+            while(boardno > 0)
+            {draw_bitboard(bitboards[boardno - 1]);cout<<"\n";cin>>boardno;}
+        }
+        if(tmp == 0)
+            keepgoing = false;
+    }
+}
+
+move_description chess_board::get_best_move(int side){
+    pair<int,move_description> bmv;
+    bmv = negamax(-INF,INF,6,side);
+    return bmv.second;
+}
+
+pair<int, move_description> chess_board::negamax(int alpha, int beta, int depthleft, int side){
+    if(depthleft == 0){
+        move_description tmp{};
+        int tmpscore = board_score * (side ? -1 : 1); 
+        return {tmpscore,tmp};
+    }       
+    vector<move_description> list_moves;
+    generate_moves(side,list_moves);
+    move_description best_move;
+    for(auto mv:list_moves){
+        make_move(mv);
+        auto p = negamax(-beta,-alpha,depthleft - 1, side^1);
+        /* cout<<p.first<<" "<<mv.moving_piece<<" "<<log2(mv.from)<<"\n"; */
+        unmake_move(mv);
+        /* cout<<board_score<<"\n"; */
+        p.first *= -1;
+        if(p.first >= beta){
+            /* cout<<"*\n"; */
+            return {beta,best_move};
+        }
+        if(p.first > alpha){
+            alpha = p.first;
+            /* cout<<alpha<<"\n"; */
+            best_move = mv;
+        }
+    }
+    return {alpha , best_move};
+}
+
+U64 chess_board::get_pawn_movebb(U64 frombb, int side){
+    if(side == 0)
+        return frombb << 8;
+    else 
+        return frombb >> 8;
+}
+
+void chess_board::generate_moves(int side, vector<move_description> &list_moves){
+    vector<move_description> quiet_moves; 
+    
+    // pawn moves 
+    U64 bb = bitboards[n_white_pawn + side];
+
+    move_description mv;
+    mv.moving_side = side;
+    mv.moving_piece = n_white_pawn + side;
+    mv.is_capture = false;
+    mv.is_pawn_promotion = false;
+
+    while(bb){
+        mv.from = bb & -bb;
+        U64 to = get_pawn_movebb(mv.from,side);
+        if(to & bitboards[n_empty]){
+            mv.to = to;
+            if((side && (to & rank_1)) || ((!side) && (to & rank_8))){
+                mv.is_pawn_promotion = true;
+                mv.promoted_piece = n_white_queen + side;
+                list_moves.push_back(mv);
+                mv.promoted_piece = n_white_knight + side;
+                list_moves.push_back(mv);
+                mv.is_pawn_promotion = false;
+            }
+            else
+                quiet_moves.push_back(mv);             
+
+            // two steps
+            to = get_pawn_movebb(to,side);
+            if(to & bitboards[n_empty]){
+                if((side && (mv.from & rank_7)) || ((!side) && (mv.from & rank_2))){
+                    mv.to = to;
+                    quiet_moves.push_back(mv);
+                }
+            }
+        }
+        bb ^= mv.from;
+    }
+
+    for(int pc = n_white_pawn; pc <= n_white_king; pc +=2){
+        bb = bitboards[pc+side];
+        while(bb){
+            move_description mv;
+            U64 from = bb & -bb;
+            U64 positions;
+            int sqfrom = log2(from);
+
+            if(pc == n_white_knight || pc == n_white_king)
+                positions = arr_piece_attacks[pc / 2 - 2][sqfrom] & (~bitboards[side]); 
+            else if(pc == n_white_pawn){
+                positions = arr_pawn_attacks[side][int(log2(from))];
+            }
+            else{
+                int ind_att_pc = pc / 2 - 2;
+                positions = arr_piece_attacks[ind_att_pc][sqfrom];   
+                for(U64 bbblockers = ((~bitboards[n_empty]) & arr_blockersandbeyond[ind_att_pc][sqfrom]);bbblockers != 0;){
+                    U64 blkr = bbblockers & -bbblockers;
+                    positions &= (~arr_behind[sqfrom][int(log2(blkr))]);
+                    bbblockers ^= blkr;
+                }
+                positions &= (~bitboards[side]);
+            }
+            mv.from = from;
+            mv.moving_side = side;
+            mv.moving_piece = pc + side;
+            mv.is_capture = true;
+            mv.is_pawn_promotion = false;
+
+            for(int i = n_white_king; i >= n_white_pawn && positions!=0ULL; i-=2){
+                U64 captures = positions & bitboards[i + 1 - side];
+                mv.captured_piece = i + 1 - side;
+                positions ^= captures;
+                while(captures){
+                    mv.to = captures & -captures;
+                    list_moves.push_back(mv);
+                    captures ^= mv.to;
+                }
+            } 
+            mv.is_capture = false;
+            while(positions && pc!=n_white_pawn){
+                mv.to = positions & -positions;
+                quiet_moves.push_back(mv);
+                positions ^= mv.to; 
+            }
+            bb ^= from;
+        }
+    }
+
+    for(auto m:quiet_moves)
+        list_moves.push_back(m);
+}
+
+void chess_board::make_move(move_description move){
+    U64 change = move.from | move.to;
+    int sqfrom = ffsl(move.from) - 1, sqto = ffsl(move.to) - 1;
+    int ind_sq_table = (move.moving_piece - move.moving_side)/2 - 1;
+    if(move.is_pawn_promotion){
+        bitboards[move.moving_piece] ^= move.from;
+        bitboards[move.promoted_piece] ^= move.to;
+        bitboards[move.moving_side] ^= change;
+        bitboards[n_empty] ^= change;
+        int ind_table_ppiece = (move.promoted_piece - move.moving_side)/2 - 1;
+        int ind_piece_val = (move.moving_piece - move.moving_side)/2 - 1;
+        int ind_ppiece_val = (move.promoted_piece - move.moving_side)/2 - 1;
+         
+        if(move.moving_side == 0){
+            board_score += piece_values[ind_ppiece_val] - piece_values[ind_piece_val];
+            board_score -= piece_square_tables[ind_sq_table][sqfrom];
+            board_score += piece_square_tables[ind_table_ppiece][sqto];
+        }
+        else{
+            sqfrom = 63 - sqfrom;     
+            sqto = 63 - sqto;
+            board_score -= piece_values[ind_ppiece_val] - piece_values[ind_piece_val];
+            board_score += piece_square_tables[ind_sq_table][sqfrom];
+            board_score -= piece_square_tables[ind_table_ppiece][sqto];
+        }
+        return;
+    }
+
+    bitboards[move.moving_piece]^=change;
+    bitboards[move.moving_side]^=change;
+    if(move.moving_side==0){
+        board_score += piece_square_tables[ind_sq_table][sqto] - piece_square_tables[ind_sq_table][sqfrom];  
+    }
+    else{
+        sqfrom = 63 - sqfrom; 
+        sqto = 63 - sqto;
+        board_score -= piece_square_tables[ind_sq_table][sqto] - piece_square_tables[ind_sq_table][sqfrom];
+    }
+    if(move.is_capture){
+        bitboards[move.captured_piece]^=move.to;
+        bitboards[1-move.moving_side]^=move.to;
+        bitboards[n_empty] ^= move.from;
+        int ind_piece_val = (move.captured_piece - 1 + move.moving_side)/2 - 1;
+        if(move.moving_side == 1)
+            board_score -= piece_values[ind_piece_val];
+        else 
+            board_score += piece_values[ind_piece_val];
+    }
+    else 
+        bitboards[n_empty]^=change;
+}
+
+void chess_board::unmake_move(move_description move){
+
+    U64 change = move.from | move.to;
+    int sqfrom = ffsl(move.from) - 1, sqto = ffsl(move.to) - 1;
+    int ind_sq_table = (move.moving_piece - move.moving_side)/2 - 1;
+    if(move.is_pawn_promotion){
+        bitboards[move.moving_piece] ^= move.from;
+        bitboards[move.promoted_piece] ^= move.to;
+        bitboards[move.moving_side] ^= change;
+        bitboards[n_empty] ^= change;
+        int ind_table_ppiece = (move.promoted_piece - move.moving_side)/2 - 1;
+        int ind_piece_val = (move.moving_piece - move.moving_side)/2 - 1;
+        int ind_ppiece_val = (move.promoted_piece - move.moving_side)/2 - 1;
+         
+        if(move.moving_side == 0){
+            board_score -= piece_values[ind_ppiece_val] - piece_values[ind_piece_val];
+            board_score += piece_square_tables[ind_sq_table][sqfrom];
+            board_score -= piece_square_tables[ind_table_ppiece][sqto];
+        }
+        else{
+            sqfrom = 63 - sqfrom;     
+            sqto = 63 - sqto;
+            board_score += piece_values[ind_ppiece_val] - piece_values[ind_piece_val];
+            board_score -= piece_square_tables[ind_sq_table][sqfrom];
+            board_score += piece_square_tables[ind_table_ppiece][sqto];
+        }
+        return;
+    }
+
+    bitboards[move.moving_piece]^=change;
+    bitboards[move.moving_side]^=change;
+    if(move.moving_side==0){
+        board_score -= piece_square_tables[ind_sq_table][sqto] - piece_square_tables[ind_sq_table][sqfrom];  
+    }
+    else{
+        sqfrom = 63 - sqfrom; 
+        sqto = 63 - sqto;
+        board_score += piece_square_tables[ind_sq_table][sqto] - piece_square_tables[ind_sq_table][sqfrom];
+    }
+    if(move.is_capture){
+        bitboards[move.captured_piece]^=move.to;
+        bitboards[1 - move.moving_side]^=move.to;
+        bitboards[n_empty]^=move.from;
+        int ind_piece_val = (move.captured_piece - 1 + move.moving_side)/2 - 1;
+        if(move.moving_side == 1)
+            board_score += piece_values[ind_piece_val];
+        else 
+            board_score -= piece_values[ind_piece_val];
+    }
+    else 
+        bitboards[n_empty]^=change;
+}
+
 
 chess_board::chess_board(){
     bitboards[n_empty]=0x0000FFFFFFFF0000;
@@ -21,14 +305,14 @@ chess_board::chess_board(){
     bitboards[n_black_king]=0x1000000000000000;
 
     char tmp[8][8] = {
-        {'R','N','B','Q','K','B','N','R'},
-        {'P','P','P','P','P','P','P','P'},
-        {'E','E','E','E','E','E','E','E'},
-        {'E','E','E','E','E','E','E','E'},
-        {'E','E','E','E','E','E','E','E'},
-        {'E','E','E','E','E','E','E','E'},
+        {'r','n','b','q','k','b','n','r'},
         {'p','p','p','p','p','p','p','p'},
-        {'r','n','b','q','k','b','n','r'}
+        {'E','E','E','E','E','E','E','E'},
+        {'E','E','E','E','E','E','E','E'},
+        {'E','E','E','E','E','E','E','E'},
+        {'E','E','E','E','E','E','E','E'},
+        {'P','P','P','P','P','P','P','P'},
+        {'R','N','B','Q','K','B','N','R'}
     };
 
     for(int i=0;i<8;i++){
@@ -38,9 +322,23 @@ chess_board::chess_board(){
     }
 
     initialise_pieceattacksarr();    
+    initialise_score();
 }
 
-void chess_board::debug(){
+void chess_board::initialise_score(){
+    board_score = 0;
+}
+
+void chess_board::mailbox_move_update(move_description bmv){
+    map<int,char> symbols{{2,'p'},{3,'P'},{4,'n'},{5,'N'},{6,'b'},{7,'B'},{8,'r'},{9,'R'},{10,'q'},{11,'Q'},{12,'k'},{13,'K'}};
+    int sqfrom = log2(bmv.from),sqto = log2(bmv.to);
+    int finalpiece;
+    if(bmv.is_pawn_promotion)
+        finalpiece = bmv.promoted_piece;
+    else 
+        finalpiece = bmv.moving_piece;
+    mailbox[sqfrom >> 3][sqfrom & 7] = 'E';
+    mailbox[sqto >> 3][sqto & 7] = symbols[finalpiece];
 }
 
 void chess_board::draw_chessboard(){
@@ -48,7 +346,7 @@ void chess_board::draw_chessboard(){
     for(int i=0;i<8;i++)
         cout<<char(97+i)<<" ";
     cout<<"\n";
-    for(int i=0;i<8;i++){
+    for(int i=7;i>=0;i--){
         cout<<8-i<<" ";
         for(int j=0;j<8;j++){
             if(mailbox[i][j]=='R')
@@ -100,6 +398,7 @@ void chess_board::draw_bitboard(U64 bb){
         cout<<"\n";
     }
 }
+
 
 void chess_board::initialise_pieceattacksarr(){
     // pawn attacks 
